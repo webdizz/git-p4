@@ -11,6 +11,7 @@
 import optparse, sys, os, marshal, subprocess, shelve
 import tempfile, getopt, hashlib, os.path, time, platform
 import re
+import shutil
 
 verbose = False
 
@@ -37,7 +38,7 @@ def p4_build_cmd(cmd):
 
     host = gitConfig("git-p4.host")
     if len(host) > 0:
-        real_cmd += "-h %s " % host
+        real_cmd += "-H %s " % host
 
     client = gitConfig("git-p4.client")
     if len(client) > 0:
@@ -131,7 +132,7 @@ def setP4ExecBit(file, mode):
 
     p4Type = "+x"
     if p4Type == '+x':
-      p4Type = 'text+x'
+        p4Type = 'text+x'
     if not isModeExec(mode):
         p4Type = getP4OpenedType(file)
         p4Type = re.sub('^([cku]?)x(.*)', '\\1\\2', p4Type)
@@ -290,13 +291,15 @@ def extractLogMessageFromGitCommit(commit):
 
     ## fixme: title is first line of commit, not 1st paragraph.
     foundTitle = False
+    iteration = 0
     for log in read_pipe_lines("git cat-file commit %s" % commit):
-       if not foundTitle:
-           if len(log) == 1:
-               foundTitle = True
-           continue
-
-       logMessage += log
+        if not foundTitle:
+            if len(log) == 1:
+                iteration += 1
+            if len(log) == 1 and iteration > 1:
+                foundTitle = True
+                continue
+            logMessage += log
     return logMessage
 
 def extractSettingsGitLog(log):
@@ -369,7 +372,7 @@ def findUpstreamBranchPoint(head = "HEAD"):
         if settings.has_key("depot-paths"):
             paths = ",".join(settings["depot-paths"])
             branchByDepotPath[paths] = "remotes/p4/" + branch
-
+        
     settings = None
     parent = 0
     while parent < 65535:
@@ -380,6 +383,9 @@ def findUpstreamBranchPoint(head = "HEAD"):
             paths = ",".join(settings["depot-paths"])
             if branchByDepotPath.has_key(paths):
                 return [branchByDepotPath[paths], settings]
+            else:
+                # return default branch if we retrieved commit from perforce
+                return ['remotes/p4/master', settings]
 
         parent = parent + 1
 
@@ -442,8 +448,8 @@ def p4ChangesForPaths(depotPaths, changeRange):
 
     changes = {}
     for line in output:
-	changeNum = int(line.split(" ")[1])
-	changes[changeNum] = True
+        changeNum = int(line.split(" ")[1])
+        changes[changeNum] = True
 
     changelist = changes.keys()
     changelist.sort()
@@ -1020,7 +1026,7 @@ class P4Sync(Command):
             if [p for p in branchPrefixes if f['path'].startswith(p)]:
                 new_files.append (f)
             else:
-                sys.stderr.write("Ignoring file outside of prefix: %s\n" % path)
+                sys.stderr.write("Ignoring file outside of prefix: %s\n" % f['path'])
         files = self.readP4Files(new_files)
 
         self.gitStream.write("commit %s\n" % branch)
@@ -1057,7 +1063,7 @@ class P4Sync(Command):
             relPath = self.stripRepoPath(file['path'], branchPrefixes)
             if file["action"] in ("delete", "purge"):
                 self.gitStream.write("D %s\n" % relPath)
-            else:
+            elif file.has_key('data'):
                 data = file['data']
 
                 mode = "644"
@@ -1093,14 +1099,6 @@ class P4Sync(Command):
             if includeFile and not excludeFile:
                 if f['action'] in ('delete', 'purge'):
                     self.gitStream.write("D %s\n" % relPath)
-
-
-
-
-
-
-
-
 
         self.gitStream.write("\n")
 
@@ -1166,7 +1164,7 @@ class P4Sync(Command):
 
         s = ''
         for (key, val) in self.users.items():
-	    s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
+            s += "%s\t%s\n" % (key.expandtabs(1), val.expandtabs(1))
 
         open(self.getUserCacheFilename(), "wb").write(s)
         self.userMapFromPerforceServer = True
@@ -1216,7 +1214,7 @@ class P4Sync(Command):
                 p = p[:-1]
             p = p[p.strip().rfind("/") + 1:]
             if not p.endswith("/"):
-               p += "/"
+                p += "/"
             return p
 
     def getBranchMapping(self):
@@ -1791,10 +1789,11 @@ class P4Clone(P4Sync):
         if not P4Sync.run(self, depotPaths):
             return False
         if self.branch != "master":
+            selfBranchName = self.branch.split('/').pop()
             if self.importIntoRemotes:
-                masterbranch = "refs/remotes/p4/master"
+                masterbranch = "refs/remotes/p4/%s" % selfBranchName
             else:
-                masterbranch = "refs/heads/p4/master"
+                masterbranch = "refs/heads/p4/%s" % selfBranchName
             if gitBranchExists(masterbranch):
                 system("git branch master %s" % masterbranch)
                 system("git checkout -f")
@@ -1881,7 +1880,7 @@ def main():
     cmd.gitdir = os.environ.get("GIT_DIR", None)
 
     args = sys.argv[2:]
-
+    
     if len(options) > 0:
         options.append(optparse.make_option("--git-dir", dest="gitdir"))
 
@@ -1914,6 +1913,10 @@ def main():
     if not cmd.run(args):
         parser.print_help()
 
+def removePreviousClone():
+    shutil.rmtree('try')
 
 if __name__ == '__main__':
+    #removePreviousClone()
+    #chdir('try')
     main()
